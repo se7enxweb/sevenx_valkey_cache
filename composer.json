@@ -1,0 +1,28 @@
+{
+    "name": "se7enxweb/sevenx_valkey_cache",
+    "description": "Redis/Valkey backed cache handler for Exponential / eZ Publish Legacy. Replaces disk file storage for template blocks and content view caches.",
+    "type": "ezpublish-legacy-extension",
+    "keywords": [ "eZ Publish", "eZ Publish Legacy", "Exponential", "cache", "redis", "valkey", "cluster", "performance" ],
+    "homepage": "https://se7enx.com",
+    "license": "GPL-2.0-or-later",
+    "authors": [
+        {
+            "name": "7x",
+            "homepage": "https://se7enx.com",
+            "email": "info@se7enx.com",
+            "role": "Developer"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {
+        "php": ">=8.1.0",
+        "se7enxweb/exponential-legacy-installer": "*"
+    },
+    "suggest": {
+        "ext-redis": "The PHP Redis extension is used to connect to Redis/Valkey servers",
+        "ext-igbinary": "igbinary provides faster and more compact serialization than the default PHP serializer"
+    },
+    "extra": {
+        "ezpublish-legacy-extension-name": "sevenx_valkey_cache"
+    }
+}
