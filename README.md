@@ -1,12 +1,12 @@
 # sevenx_valkey_cache
 
-A Redis/Valkey backed cache handler for Exponential / eZ Publish Legacy.
+A Redis/Valkey backed cache handler for Exponential 6.0.15 or later.
 
 It replaces disk file storage for:
 
 * `{valkey-block ...}` template blocks
-* content `content/view` full view cache (requires a small kernel patch)
-* compiled `eZINI` cache files (requires Exponential 6.0.15-alpha `eZINI` hooks or an equivalent kernel patch)
+* content `content/view` full view cache
+* compiled `eZINI` cache files
 
 Cache entries are stored in Redis/Valkey with TTL based expiry, generation locks
 and reverse node / subtree indexes so that publishing content selectively
@@ -28,23 +28,22 @@ Developed and maintained by **7x** — https://se7enx.com
 
 ## Requirements
 
-* Exponential / eZ Publish Legacy 4.x or compatible (for `{valkey-block}`, static cache handler and the content view patch)
-* Exponential 6.0.15-alpha or later, or a patched `lib/ezutils/classes/ezini.php`, for compiled INI cache support
+* Exponential 6.0.15 or later
 * PHP redis or igbinary extension (php-redis is recommended)
 * A running Redis or Valkey server reachable from the web server
 
-### Kernel dependencies
+### Kernel integration
 
-Two kernel integration points are required for the full feature set:
+Exponential 6.0.15 is expected to ship the kernel hooks this extension needs:
 
-1. `kernel/content/view.php` must call `sevenxValkeyCacheBlock` for the
-   content view cache. The extension ships `doc/kernel_content_view.patch`
-   for Exponential / eZ Publish Legacy 4.x and compatible versions.
-2. `lib/ezutils/classes/ezini.php` must call `sevenxValkeyINICache` from
-   `loadCache()`, `saveCache()` and `resetCache()`. These hooks are present in
-   Exponential 6.0.15-alpha (not yet released); earlier versions can use an
-   equivalent back-ported patch. When the hooks are absent, setting
-   `IniCache=enabled` has no effect.
+* `kernel/content/view.php` calls `sevenxValkeyCacheBlock` for the content view
+  cache.
+* `lib/ezutils/classes/ezini.php` calls `sevenxValkeyINICache` from
+  `loadCache()`, `saveCache()` and `resetCache()` for compiled INI arrays.
+
+If the kernel does not yet contain these calls, the same hooks can be applied
+as a manual patch.  The current rollout (which kernels are already patched) is
+tracked in `/root/bin/doc/SEVENX_VALKEY_CACHE_ROLLOUT.md`.
 
 ## Installation
 
@@ -107,39 +106,27 @@ Persistent=disabled
 LocalCache=enabled
 
 # Cache compiled eZINI arrays in Redis/Valkey instead of local PHP files.
-# Requires Exponential 6.0.15-alpha eZINI hooks (or an equivalent back-port).
+# Requires Exponential 6.0.15 or later.
 IniCache=enabled
 ```
 
 ## Content view cache
 
-To store full content view caches in Redis/Valkey instead of disk, apply the
-patch in `doc/kernel_content_view.patch` to `kernel/content/view.php`:
-
-```bash
-cd /path/to/exponential
-patch -p0 < extension/sevenx_valkey_cache/doc/kernel_content_view.patch
-```
-
-The patch is based on the `mugo_memcache` approach and changes the view script
-to use `sevenxValkeyCacheBlock` as the content view cache backend.
+In Exponential 6.0.15 `kernel/content/view.php` uses `sevenxValkeyCacheBlock`
+for the content view cache backend. This stores full view results in
+Redis/Valkey instead of disk and dramatically reduces render time for cached
+nodes.
 
 ## Compiled INI cache
 
-Exponential 6.0.15-alpha (not yet released) adds `eZINI` hooks that let the
-extension store compiled INI arrays in Redis/Valkey through `sevenxValkeyINICache`.
-This removes the per-request `var/cache/ini/*.php` disk touches and makes INI
-caches cluster-safe.
+Exponential 6.0.15 adds `eZINI` hooks that let the extension store compiled INI
+arrays in Redis/Valkey through `sevenxValkeyINICache`. This removes the
+per-request `var/cache/ini/*.php` disk touches and makes INI caches
+cluster-safe.
 
 To enable it, set `IniCache=enabled` in `valkeycache.ini` (shown in the
 configuration example above). The extension also preloads all INI arrays used
 by the current request with a single `MGET`.
-
-For Exponential versions older than 6.0.15-alpha, the same behaviour can be
-achieved by back-porting the `eZINI::loadCache()`, `eZINI::saveCache()` and
-`eZINI::resetCache()` calls to `sevenxValkeyINICache`. When the kernel hooks are
-absent, `IniCache=enabled` is ignored and INI caches continue to be stored as
-local PHP files.
 
 ## Usage
 
@@ -189,9 +176,21 @@ ancestors.
 
 The extension deliberately follows the architecture of the `mugo_memcache`
 proof-of-concept: a lightweight cache block class, a static cache handler for
-selective purging, a template function for block caching, a small patch for
-the content view cache, and a `sevenxValkeyINICache` backend for compiled INI
-caches on Exponential 6.0.15-alpha (or equivalent back-ported `eZINI` hooks).
-The storage backend has been changed from Memcache to Redis/Valkey, with added
-support for TTL based expiry, atomic generation locks, and node/subtree reverse
-indexes without requiring a relational database.
+selective purging, a template function for block caching, a `kernel/content/view.php`
+content view cache integration, and a `sevenxValkeyINICache` backend for compiled
+INI caches. The storage backend has been changed from Memcache to Redis/Valkey,
+with added support for TTL based expiry, atomic generation locks, and
+node/subtree reverse indexes without requiring a relational database.
+
+## Current rollout
+
+As of 2026-07-20, `sevenx_valkey_cache` is installed and active on the following
+Exponential/eZ Publish docroots:
+
+- `alpha.se7enx.com` — `/var/www/vhosts/alpha.se7enx.com/doc/alpha.se7enx.com`
+- `edit.alpha.se7enx.com` — `/var/www/vhosts/alpha.se7enx.com/doc/edit.alpha.se7enx.com`
+
+All other `*.se7enx.com`, `*.ezpublish.se7enx.com`, `*.exponential.earth` and
+related eZ installations do not yet have the extension or the required kernel
+hooks. The full rollout status (including kernel patch state per docroot) is
+tracked in `/root/bin/doc/SEVENX_VALKEY_CACHE_ROLLOUT.md`.
