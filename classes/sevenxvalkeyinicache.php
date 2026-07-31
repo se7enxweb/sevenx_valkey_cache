@@ -20,6 +20,10 @@
 
   It reads valkeycache.ini directly (without going through eZINI) to avoid
   recursion while eZINI itself is still loading.
+
+  NOTE: INI data is now stored in a single Redis hash keyed by the file MD5.
+  This removes the expensive full-keyspace SCAN that was performed on every
+  request to prefetch INI data.
 */
 
 class sevenxValkeyINICache
@@ -35,16 +39,10 @@ class sevenxValkeyINICache
     private $serializer = Redis::SERIALIZER_NONE;
 
     /**
-     * Request-scoped local cache of all INI arrays, populated with a single MGET.
+     * Request-scoped in-memory cache of all INI arrays, populated on demand.
      * @var array
      */
     private $localCache = array();
-
-    /**
-     * Whether the local cache has already been preloaded from Redis.
-     * @var bool
-     */
-    private $prefetched = false;
 
     public static function instance()
     {
@@ -168,16 +166,9 @@ class sevenxValkeyINICache
 
     /**
      * Build a short, deterministic hash that uniquely identifies this installation.
-     *
-     * Unlike the main cache block class, this method must avoid going through
-     * eZINI while eZINI is still bootstrapping, so it uses the filesystem
-     * docroot and the current hostname instead of eZSys/eZINI.
      */
     private function computeInstallationHash()
     {
-        // Avoid eZSys/eZINI here: this method is called while eZINI itself is
-        // still loading, so using them creates an infinite recursion. The
-        // filesystem root of the site is unique enough for key prefixing.
         $root = @realpath( dirname( __DIR__, 3 ) );
         if ( $root === false )
             $root = dirname( __DIR__, 3 );
@@ -187,9 +178,20 @@ class sevenxValkeyINICache
         return substr( hash( 'sha256', trim( $root ) . '|' . trim( $host ) ), 0, 16 );
     }
 
-    private function key( $cachedFile )
+    /**
+     * Redis hash key where all compiled INI arrays for this installation live.
+     */
+    private function iniHashKey()
     {
-        return $this->prefix . 'ini:' . md5( $cachedFile );
+        return $this->prefix . 'ini';
+    }
+
+    /**
+     * Field name inside the INI hash for a given compiled cache file.
+     */
+    private function iniField( $cachedFile )
+    {
+        return md5( $cachedFile );
     }
 
     public function isEnabled()
@@ -198,44 +200,7 @@ class sevenxValkeyINICache
     }
 
     /**
-     * Preload every INI cache entry from Redis into a request-scoped local
-     * cache using a single MGET. This turns N per-INI Redis round-trips into
-     * one.
-     */
-    private function prefetchAll()
-    {
-        if ( $this->prefetched || !$this->isEnabled() )
-            return;
-
-        $this->prefetched = true;
-        $pattern = $this->prefix . 'ini:*';
-        $keys = array();
-
-        $iterator = null;
-        do
-        {
-            $found = $this->redis->scan( $iterator, $pattern, 1000 );
-            if ( is_array( $found ) )
-            {
-                $keys = array_merge( $keys, $found );
-            }
-        } while ( $iterator > 0 );
-
-        if ( empty( $keys ) )
-            return;
-
-        $values = $this->redis->mGet( $keys );
-        foreach ( $keys as $i => $key )
-        {
-            if ( $values[$i] !== false )
-            {
-                $this->localCache[$key] = $values[$i];
-            }
-        }
-    }
-
-    /**
-     * Load a compiled INI cache array from the local cache (backed by Redis).
+     * Load a compiled INI cache array from Redis.
      *
      * @param string $cachedFile The full cache file path that eZINI would use.
      * @return array|false The cached data array, or false if not available.
@@ -245,18 +210,20 @@ class sevenxValkeyINICache
         if ( !$this->isEnabled() )
             return false;
 
-        if ( !$this->prefetched )
-            $this->prefetchAll();
+        $field = $this->iniField( $cachedFile );
+        if ( array_key_exists( $field, $this->localCache ) )
+            return $this->localCache[$field];
 
-        $key = $this->key( $cachedFile );
-        if ( !array_key_exists( $key, $this->localCache ) )
+        $value = $this->redis->hGet( $this->iniHashKey(), $field );
+        if ( $value === false )
             return false;
 
-        return $this->localCache[$key];
+        $this->localCache[$field] = $value;
+        return $value;
     }
 
     /**
-     * Save a compiled INI cache array to Redis and the local cache.
+     * Save a compiled INI cache array to Redis.
      *
      * @param string $cachedFile The full cache file path that eZINI would use.
      * @param array  $data       The cache data array (with 'rev', 'created', etc.).
@@ -269,9 +236,13 @@ class sevenxValkeyINICache
 
         try
         {
-            $key = $this->key( $cachedFile );
-            $this->localCache[$key] = $data;
-            return $this->redis->setEx( $key, $this->ttl, $data );
+            $field = $this->iniField( $cachedFile );
+            $this->localCache[$field] = $data;
+            $hash = $this->iniHashKey();
+            $result = $this->redis->hSet( $hash, $field, $data );
+            if ( $result !== false )
+                $this->redis->expire( $hash, $this->ttl );
+            return $result !== false;
         }
         catch ( Exception $e )
         {
@@ -290,9 +261,9 @@ class sevenxValkeyINICache
         if ( !$this->isEnabled() )
             return false;
 
-        $key = $this->key( $cachedFile );
-        unset( $this->localCache[$key] );
-        $this->redis->del( $key );
+        $field = $this->iniField( $cachedFile );
+        unset( $this->localCache[$field] );
+        $this->redis->hDel( $this->iniHashKey(), $field );
         return true;
     }
 
@@ -305,21 +276,10 @@ class sevenxValkeyINICache
             return false;
 
         $this->localCache = array();
-
-        $iterator = null;
-        $pattern = $this->prefix . 'ini:*';
-        do
-        {
-            $keys = $this->redis->scan( $iterator, $pattern );
-            if ( is_array( $keys ) && !empty( $keys ) )
-            {
-                $this->redis->del( $keys );
-            }
-        } while ( $iterator > 0 );
-
+        $this->redis->del( $this->iniHashKey() );
         return true;
     }
 
     private function __clone() {}
-    public function __wakeup() { trigger_error( 'Deserialization is not allowed.', E_USER_ERROR ); }
+    public function __wakeup() { trigger_error( "Deserialization is not allowed.", E_USER_ERROR ); }
 }
