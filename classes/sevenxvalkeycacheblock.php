@@ -1,7 +1,7 @@
 <?php
 //
 // Sevenx Valkey Cache extension for Exponential / eZ Publish Legacy
-// Copyright (C) 2025 7x (https://se7enx.com)
+// Copyright (C) 1998 - 2026 Exponential Foundation and 7x. All rights reserved. (https://se7enx.com)
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
