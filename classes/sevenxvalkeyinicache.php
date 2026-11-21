@@ -35,6 +35,8 @@ class sevenxValkeyINICache
     private $redis;
     private $enabled = false;
     private $prefix = 'sevenx_valkey_cache:';
+    /** KeyPrefix alone (with its colon), without the installation hash: the shared part of every installation's keys. */
+    private $basePrefix = 'sevenx_valkey_cache:';
     private $ttl = 3600;
     private $serializer = Redis::SERIALIZER_NONE;
 
@@ -69,6 +71,7 @@ class sevenxValkeyINICache
         $this->enabled = true;
 
         $prefix = rtrim( $settings['KeyPrefix'], ':' );
+        $this->basePrefix = $prefix . ':';
         $installationHash = $settings['InstallationHash'];
         if ( $installationHash === 'auto' )
             $installationHash = $this->computeInstallationHash();
@@ -169,13 +172,28 @@ class sevenxValkeyINICache
      */
     private function computeInstallationHash()
     {
-        $root = @realpath( dirname( __DIR__, 3 ) );
-        if ( $root === false )
-            $root = dirname( __DIR__, 3 );
-
         $host = isset( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : php_uname( 'n' );
 
-        return substr( hash( 'sha256', trim( $root ) . '|' . trim( $host ) ), 0, 16 );
+        return substr( hash( 'sha256', trim( self::installationRoot() ) . '|' . trim( $host ) ), 0, 16 );
+    }
+
+    /**
+     * The installation's root folder (the same for every web host and the CLI).
+     */
+    private static function installationRoot()
+    {
+        $root = @realpath( dirname( __DIR__, 3 ) );
+        return $root === false ? dirname( __DIR__, 3 ) : $root;
+    }
+
+    /**
+     * The set that lists every INI hash key this installation has written. With InstallationHash=auto each web host
+     * (and the CLI) has a key of its own; clear() needs all of them without scanning the shared key prefix, which
+     * other installations use too.
+     */
+    private function indexKey()
+    {
+        return $this->basePrefix . 'inikeys:' . substr( hash( 'sha256', trim( self::installationRoot() ) ), 0, 16 );
     }
 
     /**
@@ -241,7 +259,12 @@ class sevenxValkeyINICache
             $hash = $this->iniHashKey();
             $result = $this->redis->hSet( $hash, $field, $data );
             if ( $result !== false )
+            {
                 $this->redis->expire( $hash, $this->ttl );
+                // remembered for clear(): the hash keys of this installation, one per web host with InstallationHash=auto
+                $this->redis->sAdd( $this->indexKey(), $hash );
+                $this->redis->expire( $this->indexKey(), $this->ttl );
+            }
             return $result !== false;
         }
         catch ( Exception $e )
@@ -268,7 +291,12 @@ class sevenxValkeyINICache
     }
 
     /**
-     * Remove every compiled INI cache entry stored in Redis.
+     * Remove every compiled INI cache entry of THIS installation stored in Redis: its own hash key and the keys of its
+     * other web hosts (InstallationHash=auto gives each host one), found in the installation's index set, never by
+     * scanning the shared key prefix. Called by eZCache when the INI caches are cleared (ezcache --clear-tag=ini,
+     * --clear-id=ini/global_ini, --clear-all).
+     *
+     * @return bool
      */
     public function clear()
     {
@@ -276,7 +304,24 @@ class sevenxValkeyINICache
             return false;
 
         $this->localCache = array();
-        $this->redis->del( $this->iniHashKey() );
+        $keys = array( $this->iniHashKey() => true );
+        try
+        {
+            $members = $this->redis->sMembers( $this->indexKey() );
+        }
+        catch ( Exception $e )
+        {
+            $members = array();
+        }
+        foreach ( is_array( $members ) ? $members : array() as $key )
+        {
+            // only INI hash keys under this KeyPrefix, as save() writes them
+            if ( is_string( $key ) && strpos( $key, $this->basePrefix ) === 0 && substr( $key, -4 ) === ':ini' )
+                $keys[$key] = true;
+        }
+        foreach ( array_keys( $keys ) as $key )
+            $this->redis->del( $key );
+        $this->redis->del( $this->indexKey() );
         return true;
     }
 
