@@ -22,6 +22,13 @@ DefaultTTL=3600
 # will be released after this time.
 LockTTL=30
 
+# How long, in milliseconds, a request waits for a cache entry that another request is generating before it
+# generates the entry itself, and the pause between two looks. Keep the wait short: requests that wait on each other
+# chain their waits, and a page with several locked entries must still finish well inside the web server's timeout
+# (the old fixed wait of 10 s per entry made pages time out under load). LockWait=0 never waits.
+LockWait=2000
+LockRetryDelay=100
+
 # Use Redis/Valkey persistent connections (pconnect). May reduce connect time
 # but can cause issues if several databases share a php-fpm pool. Use with care.
 Persistent=disabled

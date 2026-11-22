@@ -62,10 +62,10 @@ class sevenxValkeyCacheBlock
 
     /**
      * Maximum number of retries while waiting for another process to generate
-     * a cache entry.
+     * a cache entry (valkeycache.ini LockWait / LockRetryDelay).
      * @var int
      */
-    private $maxRetries = 100;
+    private $maxRetries = 20;
 
     /**
      * Microseconds to sleep between retries.
@@ -102,6 +102,9 @@ class sevenxValkeyCacheBlock
 
         $this->defaultTtl = $this->iniInt( $ini, 'ValkeyCacheSettings', 'DefaultTTL', 3600 );
         $this->lockTtl = $this->iniInt( $ini, 'ValkeyCacheSettings', 'LockTTL', 30 );
+        list( $this->maxRetries, $this->retryDelay ) = self::lockWaitRetries(
+            $this->iniInt( $ini, 'ValkeyCacheSettings', 'LockWait', 2000 ),
+            $this->iniInt( $ini, 'ValkeyCacheSettings', 'LockRetryDelay', 100 ) );
         $this->persistent = $this->iniString( $ini, 'ValkeyCacheSettings', 'Persistent', 'disabled' ) === 'enabled';
         $this->useLocalCache = $this->iniString( $ini, 'ValkeyCacheSettings', 'LocalCache', 'enabled' ) !== 'disabled';
 
@@ -500,6 +503,24 @@ class sevenxValkeyCacheBlock
     private function subtreeIndexKey( $subtreeID )
     {
         return $this->prefix . 'idx:subtree:' . $subtreeID;
+    }
+
+    /**
+     * How long a request waits for a cache entry another request is generating (the lock of that key), as
+     * array( number of retries, microseconds between them ). The wait used to be fixed at 100 x 100 ms = 10 s per
+     * locked entry: a page with several entries locked by requests that were themselves waiting chained past the web
+     * server's 60 s timeout, and no request ever finished and stored the entries. After the wait a request generates
+     * the entry itself.
+     *
+     * @param int $waitMs total wait in milliseconds (LockWait, default 2000; 0 = do not wait)
+     * @param int $delayMs pause between two looks in milliseconds (LockRetryDelay, default 100)
+     * @return array
+     */
+    public static function lockWaitRetries( $waitMs, $delayMs )
+    {
+        $waitMs = max( 0, (int)$waitMs );
+        $delayMs = max( 1, (int)$delayMs );
+        return array( (int)ceil( $waitMs / $delayMs ), $delayMs * 1000 );
     }
 
     private function retryGet( $cacheKeys, $tries )
