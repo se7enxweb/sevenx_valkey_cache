@@ -142,8 +142,10 @@ number of INI files it reads:
   installation, instead of one per host name. A compiled INI file is the same
   for every host of a siteaccess.
 
-The hashes written by earlier versions are still read once, copied into the
-new keys, and removed by the next clear.
+Since 1.0.2.5 the generation is a random token, not a counter: a flush that
+deleted the counter made it start again at 0 and meet the arrays of before the
+last clear. The hashes written by versions before 1.0.2.3 are never read; the
+next clear removes them.
 
 ## Reads from a local replica (1.0.2.4)
 

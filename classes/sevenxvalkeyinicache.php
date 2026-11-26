@@ -338,14 +338,35 @@ class sevenxValkeyINICache
             try
             {
                 $g = $this->reader()->get( $this->generationKey() );
+                if ( !self::validGeneration( $g ) )
+                {
+                    // 1.0.2.5: no generation (never set, or deleted by a flush of the key prefix): a new one, never 0 or
+                    // an old number, so arrays kept under an earlier generation are never taken as current again
+                    $new = self::newGeneration();
+                    $this->redis->set( $this->generationKey(), $new, array( 'nx' ) );
+                    $g = $this->redis->get( $this->generationKey() );
+                }
             }
             catch ( Exception $e )
             {
                 $g = false;
             }
-            $this->generation = ( $g === false || $g === null ) ? '0' : (string) (int) $g;
+            // without Valkey nothing is read from it anyway; a generation of this request alone keeps APCu out of it
+            $this->generation = self::validGeneration( $g ) ? (string) $g : 'x' . self::newGeneration();
         }
         return $this->generation;
+    }
+
+    /** A new generation: unique, never a number used before (pure but for the random part). */
+    public static function newGeneration()
+    {
+        return base_convert( (string) time(), 10, 36 ) . bin2hex( random_bytes( 6 ) );
+    }
+
+    /** Whether a value read for the generation is one (pure): 1.0.2.5 tokens, never empty, never a bare counter. */
+    public static function validGeneration( $g )
+    {
+        return is_string( $g ) && preg_match( '/^[a-z0-9]{13,32}$/', $g ) === 1 && !ctype_digit( $g );
     }
 
     /** Raises the generation: every node and process drops the copies it has (APCu, entries of the old generation). */
@@ -355,7 +376,8 @@ class sevenxValkeyINICache
         $this->generation = null;
         try
         {
-            $this->redis->incr( $this->generationKey() );
+            // 1.0.2.5: a new random generation, not a counter: a deleted key that starts again at 1 met old entries
+            $this->redis->set( $this->generationKey(), self::newGeneration() );
             return true;
         }
         catch ( Exception $e )
@@ -365,8 +387,7 @@ class sevenxValkeyINICache
     }
 
     /**
-     * Load a compiled INI cache array: this request's copy, APCu, the entry of the current generation, and the hash
-     * of the versions before 1.0.2.3 (copied into the entry when found there).
+     * Load a compiled INI cache array: this request's copy, APCu, then the entry of the current generation.
      *
      * @param string $cachedFile The full cache file path that eZINI would use.
      * @return array|false The cached data array, or false if not available.
@@ -390,14 +411,10 @@ class sevenxValkeyINICache
 
         try
         {
+            // 1.0.2.5: never from the hash of the versions before 1.0.2.3: it holds arrays of before the last clear
             $value = $this->reader()->get( $this->entryKey( $generation, $field ) );
             if ( !is_array( $value ) )
-            {
-                $value = $this->reader()->hGet( $this->iniHashKey(), $field );
-                if ( !is_array( $value ) )
-                    return false;
-                $this->redis->set( $this->entryKey( $generation, $field ), $value, array( 'ex' => self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) ) );
-            }
+                return false;
         }
         catch ( Exception $e )
         {

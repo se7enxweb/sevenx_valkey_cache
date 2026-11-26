@@ -186,12 +186,36 @@ class sevenxValkeyINICacheClearTest extends PHPUnit\Framework\TestCase
         $_SERVER['REQUEST_TIME_FLOAT'] = '2000.1';
         $c = $this->host( 'aaaaaaaaaaaaaaaa' );
         $c->save( '/var/cache/ini/site.php', array( 'v' => 'old' ) );
-        $this->assertSame( '0', $c->generation() );
+        $before = $c->generation();
+        $this->assertTrue( sevenxValkeyINICache::validGeneration( $before ) );
         $c->clear();
         $_SERVER['REQUEST_TIME_FLOAT'] = '2000.2';
         $c = $this->host( 'aaaaaaaaaaaaaaaa' );
-        $this->assertSame( '1', $c->generation() );
+        $this->assertNotSame( $before, $c->generation() );
         $this->assertFalse( $c->load( '/var/cache/ini/site.php' ), 'the array of the old generation is gone for this installation' );
+    }
+
+    public function testADeletedGenerationNeverBringsOldArraysBack()
+    {
+        // 1.0.2.5: a flush of the key prefix deleted the counter; it started again at 0 and met the arrays of before
+        $_SERVER['REQUEST_TIME_FLOAT'] = '2100.1';
+        $c = $this->host( 'aaaaaaaaaaaaaaaa' );
+        $c->save( '/var/cache/ini/site.php', array( 'v' => 'old' ) );
+        $g = new ReflectionMethod( 'sevenxValkeyINICache', 'generationKey' );
+        if ( PHP_VERSION_ID < 80100 ) $g->setAccessible( true );
+        unset( $this->redis->data[$g->invoke( $c )] );
+        $_SERVER['REQUEST_TIME_FLOAT'] = '2100.2';
+        $c = $this->host( 'aaaaaaaaaaaaaaaa' );
+        $this->assertFalse( $c->load( '/var/cache/ini/site.php' ) );
+    }
+
+    public function testGenerationsAreTokensNotCounters()
+    {
+        $a = sevenxValkeyINICache::newGeneration();
+        $this->assertTrue( sevenxValkeyINICache::validGeneration( $a ) );
+        $this->assertNotSame( $a, sevenxValkeyINICache::newGeneration() );
+        foreach ( array( '0', '1', '13', '', false, null, 'x' ) as $old )
+            $this->assertFalse( sevenxValkeyINICache::validGeneration( $old ) );
     }
 
     public function testPerHostAClearFromTheCommandLineReachesEveryWebHost()
@@ -218,13 +242,12 @@ class sevenxValkeyINICacheClearTest extends PHPUnit\Framework\TestCase
         $this->assertFalse( $c->load( '/var/cache/ini/content.php' ), 'other nodes may hold copies of the old generation: all of it goes' );
     }
 
-    public function testAnArrayOfTheVersionsBeforeIsReadFromTheOldHashOnceAndKeptAsAnEntry()
+    public function testTheHashOfTheVersionsBeforeIsNeverRead()
     {
         $_SERVER['REQUEST_TIME_FLOAT'] = '4000.1';
         $this->redis->data['sevenx_valkey_cache:aaaaaaaaaaaaaaaa:ini'][md5( '/var/cache/ini/site.php' )] = array( 'v' => 'legacy' );
         $c = $this->host( 'aaaaaaaaaaaaaaaa' );
-        $this->assertSame( array( 'v' => 'legacy' ), $c->load( '/var/cache/ini/site.php' ) );
-        $this->assertArrayHasKey( 'sevenx_valkey_cache:aaaaaaaaaaaaaaaa:ini:g0:' . md5( '/var/cache/ini/site.php' ), $this->redis->data );
+        $this->assertFalse( $c->load( '/var/cache/ini/site.php' ), 'it holds arrays of before the last clear' );
     }
 
     public function testEveryEntryHasAJitteredTtlWithinItsBounds()
