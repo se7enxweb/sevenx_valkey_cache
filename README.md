@@ -125,8 +125,25 @@ per-request `var/cache/ini/*.php` disk touches and makes INI caches
 cluster-safe.
 
 To enable it, set `IniCache=enabled` in `valkeycache.ini` (shown in the
-configuration example above). The extension also preloads all INI arrays used
-by the current request with a single `MGET`.
+configuration example above).
+
+Since 1.0.2.3 a request makes one round trip for its settings, whatever the
+number of INI files it reads:
+
+* Every compiled array is its own key, named by a generation number of the
+  installation. A request reads the generation once (one `GET`), then each
+  array from APCu (`IniLocalCache=enabled`), and from Valkey only when APCu
+  does not have it yet. Clearing the INI caches, or deleting one, raises the
+  generation, so every node and every PHP process drops its copies at once.
+* Every array expires after `IniTTL` seconds plus a random part of up to
+  `IniTTLJitter`, so arrays written together never all expire in the same
+  second.
+* `IniSharedAcrossHosts=enabled` keeps one copy for all web hosts of the
+  installation, instead of one per host name. A compiled INI file is the same
+  for every host of a siteaccess.
+
+The hashes written by earlier versions are still read once, copied into the
+new keys, and removed by the next clear.
 
 ## Usage
 

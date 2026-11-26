@@ -24,6 +24,17 @@
   NOTE: INI data is now stored in a single Redis hash keyed by the file MD5.
   This removes the expensive full-keyspace SCAN that was performed on every
   request to prefetch INI data.
+
+  1.0.2.3: one Valkey round trip per request instead of one per INI file. Each
+  compiled array is its own key, named by a generation number, with a TTL that
+  has a random part (no hour where every array expires at once), and it is kept
+  in APCu as well (IniLocalCache), under the same generation. A request reads
+  the generation once (a GET) and every array it needs from APCu; a clear or a
+  delete raises the generation, so every node and every PHP process drops its
+  copies at once. IniSharedAcrossHosts=enabled keys the arrays by the
+  installation alone, not by the web host name: a compiled INI file is the
+  same for every host of a siteaccess (its name already says which files and
+  siteaccess it was built from), so the hosts of an installation share one copy.
 */
 
 class sevenxValkeyINICache
@@ -38,6 +49,15 @@ class sevenxValkeyINICache
     /** KeyPrefix alone (with its colon), without the installation hash: the shared part of every installation's keys. */
     private $basePrefix = 'sevenx_valkey_cache:';
     private $ttl = 3600;
+    /** Seconds an INI array is kept (IniTTL) and the largest random part added to it (IniTTLJitter) */
+    private $iniTTL = 86400;
+    private $iniJitter = 8640;
+    /** Whether the arrays are also kept in APCu (IniLocalCache, and APCu usable in this process) */
+    private $apcu = false;
+    /** @var string|null the generation of this request, read once (generation()) */
+    private $generation = null;
+    /** @var string|null the request the generation and the local copies belong to (a persistent worker serves many) */
+    private $request = null;
     private $serializer = Redis::SERIALIZER_NONE;
 
     /**
@@ -74,7 +94,7 @@ class sevenxValkeyINICache
         $this->basePrefix = $prefix . ':';
         $installationHash = $settings['InstallationHash'];
         if ( $installationHash === 'auto' )
-            $installationHash = $this->computeInstallationHash();
+            $installationHash = $this->computeInstallationHash( $settings['IniSharedAcrossHosts'] === 'enabled' );
         if ( $installationHash !== '' )
             $prefix .= ':' . $installationHash;
 
@@ -82,6 +102,9 @@ class sevenxValkeyINICache
         $this->ttl     = (int) $settings['DefaultTTL'];
         if ( $this->ttl <= 0 )
             $this->ttl = 3600;
+        $this->iniTTL = max( 60, (int) $settings['IniTTL'] );
+        $this->iniJitter = max( 0, (int) $settings['IniTTLJitter'] );
+        $this->apcu = $settings['IniLocalCache'] === 'enabled' && function_exists( 'apcu_enabled' ) && apcu_enabled();
 
         $host = $settings['Host'];
         $port = (int) $settings['Port'];
@@ -128,6 +151,10 @@ class sevenxValkeyINICache
             'IniCache'         => 'disabled',
             'DefaultTTL'       => 3600,
             'Persistent'       => 'disabled',
+            'IniLocalCache'    => 'enabled',
+            'IniSharedAcrossHosts' => 'disabled',
+            'IniTTL'           => 86400,
+            'IniTTLJitter'     => 8640,
         );
 
         $file = __DIR__ . '/../../../' . self::INI_FILE;
@@ -170,8 +197,10 @@ class sevenxValkeyINICache
     /**
      * Build a short, deterministic hash that uniquely identifies this installation.
      */
-    private function computeInstallationHash()
+    private function computeInstallationHash( $sharedAcrossHosts = false )
     {
+        if ( $sharedAcrossHosts )
+            return substr( hash( 'sha256', trim( self::installationRoot() ) . '|ini' ), 0, 16 );
         $host = isset( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : php_uname( 'n' );
 
         return substr( hash( 'sha256', trim( self::installationRoot() ) . '|' . trim( $host ) ), 0, 16 );
@@ -218,7 +247,90 @@ class sevenxValkeyINICache
     }
 
     /**
-     * Load a compiled INI cache array from Redis.
+     * The key of the generation number of this installation's INI arrays: one for the installation (by its root, like
+     * the index set), whatever the host, so a clear from the command line reaches the arrays of every web host.
+     */
+    private function generationKey()
+    {
+        return $this->basePrefix . 'inigen:' . substr( hash( 'sha256', trim( self::installationRoot() ) ), 0, 16 );
+    }
+
+    /** The key of one INI array in one generation */
+    private function entryKey( $generation, $field )
+    {
+        return $this->prefix . 'ini:g' . $generation . ':' . $field;
+    }
+
+    /** The APCu key of one INI array in one generation */
+    private function apcuKey( $generation, $field )
+    {
+        return 'svc-ini:' . $this->prefix . 'g' . $generation . ':' . $field;
+    }
+
+    /**
+     * Seconds to keep an entry: IniTTL plus a random part up to IniTTLJitter (pure but for the random number), so the
+     * entries written together do not expire together.
+     */
+    public static function ttlWithJitter( $ttl, $jitter, $random = null )
+    {
+        $ttl = max( 1, (int) $ttl );
+        $jitter = max( 0, (int) $jitter );
+        if ( $jitter === 0 )
+            return $ttl;
+        $r = $random === null ? mt_rand( 0, $jitter ) : max( 0, min( $jitter, (int) $random ) );
+        return $ttl + $r;
+    }
+
+    /** Starts the request's state again when a new request is served (PHP-FPM: always; a persistent worker: per request). */
+    private function forRequest()
+    {
+        $request = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (string) $_SERVER['REQUEST_TIME_FLOAT'] : '';
+        if ( $this->request !== $request )
+        {
+            $this->request = $request;
+            $this->generation = null;
+            $this->localCache = array();
+        }
+    }
+
+    /** The generation of this installation's INI arrays, read once per request (the one round trip of a request). */
+    public function generation()
+    {
+        $this->forRequest();
+        if ( $this->generation === null )
+        {
+            try
+            {
+                $g = $this->redis->get( $this->generationKey() );
+            }
+            catch ( Exception $e )
+            {
+                $g = false;
+            }
+            $this->generation = ( $g === false || $g === null ) ? '0' : (string) (int) $g;
+        }
+        return $this->generation;
+    }
+
+    /** Raises the generation: every node and process drops the copies it has (APCu, entries of the old generation). */
+    private function bumpGeneration()
+    {
+        $this->localCache = array();
+        $this->generation = null;
+        try
+        {
+            $this->redis->incr( $this->generationKey() );
+            return true;
+        }
+        catch ( Exception $e )
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Load a compiled INI cache array: this request's copy, APCu, the entry of the current generation, and the hash
+     * of the versions before 1.0.2.3 (copied into the entry when found there).
      *
      * @param string $cachedFile The full cache file path that eZINI would use.
      * @return array|false The cached data array, or false if not available.
@@ -229,19 +341,40 @@ class sevenxValkeyINICache
             return false;
 
         $field = $this->iniField( $cachedFile );
+        $generation = $this->generation();
         if ( array_key_exists( $field, $this->localCache ) )
             return $this->localCache[$field];
 
-        $value = $this->redis->hGet( $this->iniHashKey(), $field );
-        if ( $value === false )
-            return false;
+        if ( $this->apcu )
+        {
+            $value = apcu_fetch( $this->apcuKey( $generation, $field ), $found );
+            if ( $found && is_array( $value ) )
+                return $this->localCache[$field] = $value;
+        }
 
-        $this->localCache[$field] = $value;
-        return $value;
+        try
+        {
+            $value = $this->redis->get( $this->entryKey( $generation, $field ) );
+            if ( !is_array( $value ) )
+            {
+                $value = $this->redis->hGet( $this->iniHashKey(), $field );
+                if ( !is_array( $value ) )
+                    return false;
+                $this->redis->set( $this->entryKey( $generation, $field ), $value, array( 'ex' => self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) ) );
+            }
+        }
+        catch ( Exception $e )
+        {
+            return false;
+        }
+
+        if ( $this->apcu )
+            @apcu_store( $this->apcuKey( $generation, $field ), $value, self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) );
+        return $this->localCache[$field] = $value;
     }
 
     /**
-     * Save a compiled INI cache array to Redis.
+     * Save a compiled INI cache array as the entry of the current generation (and in APCu).
      *
      * @param string $cachedFile The full cache file path that eZINI would use.
      * @param array  $data       The cache data array (with 'rev', 'created', etc.).
@@ -255,16 +388,11 @@ class sevenxValkeyINICache
         try
         {
             $field = $this->iniField( $cachedFile );
+            $generation = $this->generation();
             $this->localCache[$field] = $data;
-            $hash = $this->iniHashKey();
-            $result = $this->redis->hSet( $hash, $field, $data );
-            if ( $result !== false )
-            {
-                $this->redis->expire( $hash, $this->ttl );
-                // remembered for clear(): the hash keys of this installation, one per web host with InstallationHash=auto
-                $this->redis->sAdd( $this->indexKey(), $hash );
-                $this->redis->expire( $this->indexKey(), $this->ttl );
-            }
+            $result = $this->redis->set( $this->entryKey( $generation, $field ), $data, array( 'ex' => self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) ) );
+            if ( $this->apcu )
+                @apcu_store( $this->apcuKey( $generation, $field ), $data, self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) );
             return $result !== false;
         }
         catch ( Exception $e )
@@ -274,7 +402,7 @@ class sevenxValkeyINICache
     }
 
     /**
-     * Delete a single compiled INI cache entry.
+     * Delete a single compiled INI cache entry. The generation goes up as well, so no node keeps a copy in APCu.
      *
      * @param string $cachedFile
      * @return bool
@@ -285,9 +413,15 @@ class sevenxValkeyINICache
             return false;
 
         $field = $this->iniField( $cachedFile );
-        unset( $this->localCache[$field] );
-        $this->redis->hDel( $this->iniHashKey(), $field );
-        return true;
+        try
+        {
+            $this->redis->del( $this->entryKey( $this->generation(), $field ) );
+            $this->redis->hDel( $this->iniHashKey(), $field );
+        }
+        catch ( Exception $e )
+        {
+        }
+        return $this->bumpGeneration();
     }
 
     /**
@@ -303,7 +437,7 @@ class sevenxValkeyINICache
         if ( !$this->isEnabled() )
             return false;
 
-        $this->localCache = array();
+        $this->bumpGeneration();
         $keys = array( $this->iniHashKey() => true );
         try
         {

@@ -43,5 +43,16 @@ LocalCache=enabled
 # INI caches cluster-safe. Disable this if you prefer the default filesystem
 # cache or if Redis is not available.
 IniCache=enabled
+# 1.0.2.3: keep the compiled INI arrays in APCu as well, under the generation that a clear raises, so a request reads
+# one key from Valkey (the generation) instead of one per INI file. Ignored where APCu is not usable.
+IniLocalCache=enabled
+# One copy of the compiled INI arrays for every web host of the installation instead of one per host name (with
+# InstallationHash=auto). A compiled INI file is the same for every host of a siteaccess: its name already says which
+# files and siteaccess it was built from.
+IniSharedAcrossHosts=enabled
+# Seconds a compiled INI array is kept (they change only with the settings, and a clear raises the generation), and
+# the largest random number of seconds added to each, so the arrays written together do not expire together.
+IniTTL=21600
+IniTTLJitter=3600
 
 */ ?>
