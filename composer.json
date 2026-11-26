@@ -15,7 +15,7 @@
     ],
     "minimum-stability": "dev",
     "require": {
-        "php": ">=8.1.0",
+        "php": ">=8.0",
         "se7enxweb/exponential-legacy-installer": "*"
     },
     "suggest": {
