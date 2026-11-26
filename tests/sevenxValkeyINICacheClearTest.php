@@ -1,7 +1,7 @@
 <?php
 //
 // Sevenx Valkey Cache extension for Exponential
-// Copyright (C) 1998 - 2026 Exponential Foundation and 7x. All rights reserved. (https://se7enx.com)
+// Copyright (C) 1998 - 2026 Exponential Foundation and 7x; All rights reserved. (https://se7enx.com)
 // GNU General Public License v2.0 (or any later version)
 //
 // sevenxValkeyINICache::clear() removes every compiled INI hash of THIS installation (with InstallationHash=auto each
