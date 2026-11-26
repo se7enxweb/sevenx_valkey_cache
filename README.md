@@ -145,6 +145,19 @@ number of INI files it reads:
 The hashes written by earlier versions are still read once, copied into the
 new keys, and removed by the next clear.
 
+## Reads from a local replica (1.0.2.4)
+
+With `ReadHost` and `ReadPort` set, every read (cache-blocks, the view cache,
+the compiled INI arrays) goes to that server, a replica of `Host` on the same
+machine, and falls back to `Host` when it does not answer. Writes, locks and
+clears always go to `Host`. A replica may lag a few milliseconds behind; a read
+that misses an entry written a moment ago renders it again, as any miss does.
+
+A cache-block with node or subtree expiry prefetches the other entries of that
+node with one `MGET` only while the node has at most `PrefetchMaxKeys` entries
+(32). The index of a node lists every variant of its blocks (per user, address
+and siteaccess); an `MGET` of thousands of keys blocked Valkey to serve one.
+
 ## Usage
 
 ### `{valkey-block}` template function

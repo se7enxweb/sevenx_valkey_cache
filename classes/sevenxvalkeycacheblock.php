@@ -46,6 +46,12 @@ class sevenxValkeyCacheBlock
     private $lockTtl;
     private $persistent;
     private $useLocalCache;
+    /** Largest index (entries of one node or subtree) prefetched with one MGET (PrefetchMaxKeys); a larger one is not */
+    private $prefetchMaxKeys = 32;
+    /** 1.0.2.4: the server reads go to (ReadHost, ReadPort: a local replica), '' for the primary; its connection */
+    private $readHost = '';
+    private $readPort = 6379;
+    private $reader = null;
 
     /**
      * Request-scoped in-memory cache to avoid repeated Redis round-trips.
@@ -107,6 +113,9 @@ class sevenxValkeyCacheBlock
             $this->iniInt( $ini, 'ValkeyCacheSettings', 'LockRetryDelay', 100 ) );
         $this->persistent = $this->iniString( $ini, 'ValkeyCacheSettings', 'Persistent', 'disabled' ) === 'enabled';
         $this->useLocalCache = $this->iniString( $ini, 'ValkeyCacheSettings', 'LocalCache', 'enabled' ) !== 'disabled';
+        $this->prefetchMaxKeys = max( 0, $this->iniInt( $ini, 'ValkeyCacheSettings', 'PrefetchMaxKeys', 32 ) );
+        $this->readHost = trim( $this->iniString( $ini, 'ValkeyCacheSettings', 'ReadHost', '' ) );
+        $this->readPort = $this->iniInt( $ini, 'ValkeyCacheSettings', 'ReadPort', 6379 );
 
         if ( $this->defaultTtl <= 0 )
             $this->defaultTtl = 3600;
@@ -144,6 +153,38 @@ class sevenxValkeyCacheBlock
             $this->redis = null;
             $this->enabled = false;
         }
+    }
+
+    /**
+     * The connection reads go to: a local replica (ReadHost) when one is set and answers, else the primary. Writes,
+     * locks and clears always go to the primary. A replica may lag a few milliseconds: a read that misses an entry
+     * written a moment ago renders it again, as any miss does.
+     *
+     * @return Redis
+     */
+    private function reader()
+    {
+        if ( $this->reader !== null )
+            return $this->reader;
+        $this->reader = $this->redis;
+        if ( $this->readHost === '' || ( $this->readHost === $this->host && $this->readPort === $this->port ) )
+            return $this->reader;
+        try
+        {
+            $r = new Redis();
+            if ( $this->persistent )
+                $r->pconnect( $this->readHost, $this->readPort, 0.5 );
+            else
+                $r->connect( $this->readHost, $this->readPort, 0.5 );
+            $r->select( $this->db );
+            $r->setOption( Redis::OPT_SERIALIZER, $this->redis->getOption( Redis::OPT_SERIALIZER ) );
+            $this->reader = $r;
+        }
+        catch ( Exception $e )
+        {
+            eZDebug::writeWarning( 'The read replica ' . $this->readHost . ':' . $this->readPort . ' does not answer; reading from the primary', __METHOD__ );
+        }
+        return $this->reader;
     }
 
     public static function instance()
@@ -196,7 +237,7 @@ class sevenxValkeyCacheBlock
             return $this->localCache[$key];
         }
 
-        $content = $this->redis->get( $key );
+        $content = $this->reader()->get( $key );
 
         if ( !$lock )
         {
@@ -403,6 +444,13 @@ class sevenxValkeyCacheBlock
         return $this->flush();
     }
 
+    /** Whether an index of this many entries is prefetched with one MGET (pure): 1 to $max entries, never 0 or more. */
+    public static function shouldPrefetch( $count, $max )
+    {
+        $count = (int) $count;
+        return $count > 0 && $count <= (int) $max;
+    }
+
     /**
      * Prefetch every cache entry indexed by a node id using a single MGET call.
      * The results are stored in the request-scoped local cache.
@@ -418,12 +466,17 @@ class sevenxValkeyCacheBlock
 
         $this->prefetchedNodes[$nodeID] = true;
         $indexKey = $this->nodeIndexKey( $nodeID );
-        $keys = $this->redis->sMembers( $indexKey );
+        // 1.0.2.4: only a small index is prefetched. An index lists every variant of every block of the node (one per
+        // user, address, siteaccess), never cleaned of expired ones: on se7enx.com an MGET of 2 300 keys, some
+        // megabytes, blocked Valkey for 20 ms and more to serve one block.
+        if ( !$this->useLocalCache || !self::shouldPrefetch( $this->reader()->sCard( $indexKey ), $this->prefetchMaxKeys ) )
+            return true;
+        $keys = $this->reader()->sMembers( $indexKey );
 
-        if ( !$this->useLocalCache || !is_array( $keys ) || empty( $keys ) )
+        if ( !is_array( $keys ) || empty( $keys ) )
             return true;
 
-        $values = $this->redis->mGet( $keys );
+        $values = $this->reader()->mGet( $keys );
         foreach ( $keys as $i => $key )
         {
             $this->localCache[$key] = $values[$i];
@@ -445,12 +498,17 @@ class sevenxValkeyCacheBlock
 
         $this->prefetchedSubtrees[$subtreeID] = true;
         $indexKey = $this->subtreeIndexKey( $subtreeID );
-        $keys = $this->redis->sMembers( $indexKey );
+        // 1.0.2.4: only a small index is prefetched. An index lists every variant of every block of the node (one per
+        // user, address, siteaccess), never cleaned of expired ones: on se7enx.com an MGET of 2 300 keys, some
+        // megabytes, blocked Valkey for 20 ms and more to serve one block.
+        if ( !$this->useLocalCache || !self::shouldPrefetch( $this->reader()->sCard( $indexKey ), $this->prefetchMaxKeys ) )
+            return true;
+        $keys = $this->reader()->sMembers( $indexKey );
 
-        if ( !$this->useLocalCache || !is_array( $keys ) || empty( $keys ) )
+        if ( !is_array( $keys ) || empty( $keys ) )
             return true;
 
-        $values = $this->redis->mGet( $keys );
+        $values = $this->reader()->mGet( $keys );
         foreach ( $keys as $i => $key )
         {
             $this->localCache[$key] = $values[$i];

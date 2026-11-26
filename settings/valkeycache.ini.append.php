@@ -5,6 +5,10 @@
 Host=127.0.0.1
 Port=6379
 Database=0
+# 1.0.2.4: reads (blocks, view cache, INI) go to this server when set, a local replica of Host, and fall back to
+# Host when it does not answer; writes, locks and clears always go to Host. Empty: everything goes to Host.
+ReadHost=
+ReadPort=6379
 
 # Prefix applied to every key written by this extension. Keep it unique per
 # installation when several sites share a single Redis/Valkey instance.
@@ -37,6 +41,9 @@ Persistent=disabled
 # repeated Redis round-trips when the same key is requested more than once per
 # page. Set to disabled only when debugging cache consistency.
 LocalCache=enabled
+# 1.0.2.4: a block with node or subtree expiry prefetches the other entries of that node with one MGET only when
+# the node has at most this many (an index lists every variant: per user, address and siteaccess). 0 never prefetches.
+PrefetchMaxKeys=32
 
 # Cache compiled eZINI arrays in Redis/Valkey instead of local PHP files.
 # This removes per-request disk touches for var/cache/ini/ files and makes

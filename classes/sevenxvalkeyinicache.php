@@ -58,6 +58,11 @@ class sevenxValkeyINICache
     private $generation = null;
     /** @var string|null the request the generation and the local copies belong to (a persistent worker serves many) */
     private $request = null;
+    /** 1.0.2.4: reads go to a local replica (ReadHost, ReadPort) when one is set and answers; writes to the primary */
+    private $reader = null;
+    private $readHost = '';
+    private $readPort = 6379;
+    private $connectArgs = array();
     private $serializer = Redis::SERIALIZER_NONE;
 
     /**
@@ -109,6 +114,9 @@ class sevenxValkeyINICache
         $host = $settings['Host'];
         $port = (int) $settings['Port'];
         $db   = (int) $settings['Database'];
+        $this->readHost = trim( (string) $settings['ReadHost'] );
+        $this->readPort = (int) $settings['ReadPort'];
+        $this->connectArgs = array( $host, $port, $db, $settings['Persistent'] === 'enabled' );
 
         try
         {
@@ -155,6 +163,8 @@ class sevenxValkeyINICache
             'IniSharedAcrossHosts' => 'disabled',
             'IniTTL'           => 86400,
             'IniTTLJitter'     => 8640,
+            'ReadHost'         => '',
+            'ReadPort'         => 6379,
         );
 
         $file = __DIR__ . '/../../../' . self::INI_FILE;
@@ -246,6 +256,32 @@ class sevenxValkeyINICache
         return $this->enabled && $this->redis !== null;
     }
 
+    /** The connection reads go to: the local replica when ReadHost is set and answers, else the primary. */
+    private function reader()
+    {
+        if ( $this->reader !== null )
+            return $this->reader;
+        $this->reader = $this->redis;
+        list( $host, $port, $db, $persistent ) = $this->connectArgs + array( '', 0, 0, false );
+        if ( $this->readHost === '' || ( $this->readHost === $host && $this->readPort === (int) $port ) || !class_exists( 'Redis' ) )
+            return $this->reader;
+        try
+        {
+            $r = new Redis();
+            if ( $persistent )
+                $r->pconnect( $this->readHost, $this->readPort, 0.5 );
+            else
+                $r->connect( $this->readHost, $this->readPort, 0.5 );
+            $r->select( (int) $db );
+            $r->setOption( Redis::OPT_SERIALIZER, $this->serializer );
+            $this->reader = $r;
+        }
+        catch ( Exception $e )
+        {
+        }
+        return $this->reader;
+    }
+
     /**
      * The key of the generation number of this installation's INI arrays: one for the installation (by its root, like
      * the index set), whatever the host, so a clear from the command line reaches the arrays of every web host.
@@ -301,7 +337,7 @@ class sevenxValkeyINICache
         {
             try
             {
-                $g = $this->redis->get( $this->generationKey() );
+                $g = $this->reader()->get( $this->generationKey() );
             }
             catch ( Exception $e )
             {
@@ -354,10 +390,10 @@ class sevenxValkeyINICache
 
         try
         {
-            $value = $this->redis->get( $this->entryKey( $generation, $field ) );
+            $value = $this->reader()->get( $this->entryKey( $generation, $field ) );
             if ( !is_array( $value ) )
             {
-                $value = $this->redis->hGet( $this->iniHashKey(), $field );
+                $value = $this->reader()->hGet( $this->iniHashKey(), $field );
                 if ( !is_array( $value ) )
                     return false;
                 $this->redis->set( $this->entryKey( $generation, $field ), $value, array( 'ex' => self::ttlWithJitter( $this->iniTTL, $this->iniJitter ) ) );

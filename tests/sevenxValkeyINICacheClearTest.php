@@ -162,6 +162,25 @@ class sevenxValkeyINICacheClearTest extends PHPUnit\Framework\TestCase
         $p->setValue( $o, $value );
     }
 
+    public function testWithoutAReadHostReadsGoToThePrimary()
+    {
+        $c = $this->host( 'aaaaaaaaaaaaaaaa' );
+        $m = new ReflectionMethod( 'sevenxValkeyINICache', 'reader' );
+        if ( PHP_VERSION_ID < 80100 ) $m->setAccessible( true );
+        $this->assertSame( $this->redis, $m->invoke( $c ) );
+    }
+
+    public function testAReadHostThatDoesNotAnswerFallsBackToThePrimary()
+    {
+        $c = $this->host( 'aaaaaaaaaaaaaaaa' );
+        $this->setProp( $c, 'readHost', '127.0.0.1' );
+        $this->setProp( $c, 'readPort', 1 );                               // nothing listens there
+        $this->setProp( $c, 'connectArgs', array( '127.0.0.1', 6379, 0, false ) );
+        $m = new ReflectionMethod( 'sevenxValkeyINICache', 'reader' );
+        if ( PHP_VERSION_ID < 80100 ) $m->setAccessible( true );
+        $this->assertSame( $this->redis, $m->invoke( $c ) );
+    }
+
     public function testAClearRaisesTheGenerationSoNoCopyOfTheOldArraysIsServed()
     {
         $_SERVER['REQUEST_TIME_FLOAT'] = '2000.1';
