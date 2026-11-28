@@ -63,7 +63,8 @@ class sevenxValkeyINICache
     private $readHost = '';
     private $readPort = 6379;
     private $connectArgs = array();
-    private $serializer = Redis::SERIALIZER_NONE;
+    /** Redis::SERIALIZER_NONE (0), written as its value: a constant of Redis here is a fatal error where the PHP redis extension is missing */
+    private $serializer = 0;
 
     /**
      * Request-scoped in-memory cache of all INI arrays, populated on demand.
