@@ -237,7 +237,14 @@ Only the keys of this installation (its `KeyPrefix` and `InstallationHash`) are
 touched. Without the PHP redis extension, or with Valkey not answering, nothing
 is cleared in Valkey and the kernel's clear goes on with a warning. The listener
 needs a kernel with `expCacheClearListener` (Exponential 6.0.15 after
-2026-11-27); an older kernel does not read the setting.
+2026-11-27); an older kernel does not read the setting, and the extension
+works with it as before (its static cache handler, cache-blocks and INI cache
+are unchanged).
+
+Also in 1.0.2.6: the INI cache class loads without the PHP redis extension.
+Before, eZINI's first use of it stopped with "Class Redis not found" where the
+extension was missing; it now reports itself disabled and the INI files are
+read as usual.
 
 ## Implementation notes
 
