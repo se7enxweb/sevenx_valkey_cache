@@ -12,3 +12,5 @@ permissions:
 jobs:
   extension:
     uses: se7enxweb/.github/.github/workflows/extension-ci.yml@main
+    with:
+      phpunit: true

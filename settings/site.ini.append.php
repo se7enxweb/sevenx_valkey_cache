@@ -4,6 +4,13 @@
 # Load template function / operator autoloads from this extension.
 ExtensionAutoloadPath[]=sevenx_valkey_cache
 
+[Cache]
+# Tells the kernel's eZCache to call sevenxValkeyCacheClearListener for every cache it clears (ezcache, Setup >
+# Cache, exp:velocity deploy) and for the nodes of every content change, so the view caches and
+# {valkey-block} entries kept in Valkey are cleared with the kernel's own. Needs Exponential 6.0.15 or later;
+# an older kernel does not read this setting.
+ClearListeners[]=sevenxValkeyCacheClearListener
+
 [ContentSettings]
 # Enable the static cache handler so node/subtree changes can purge cached content.
 StaticCache=enabled

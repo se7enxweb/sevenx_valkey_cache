@@ -204,6 +204,41 @@ It is invoked when content changes and purges the Redis/Valkey view cache and
 block cache entries that are indexed by the affected node ids and their
 ancestors.
 
+### Cleared with the kernel's caches (1.0.2.6)
+
+From 1.0.2.6 the kernel's own cache clearing reaches the caches this extension
+keeps in Valkey. The extension registers `sevenxValkeyCacheClearListener` in its
+`settings/site.ini.append.php`:
+
+```ini
+[Cache]
+ClearListeners[]=sevenxValkeyCacheClearListener
+```
+
+The kernel's `eZCache` calls it after every cache item it clears or purges, so
+the same thing happens from `bin/php/ezcache.php` (`--clear-id`, `--clear-tag`,
+`--clear-all`, `--purge`), from Setup > Cache in the administration interface
+and from the cache steps of `exp:velocity deploy` (the compiled INI arrays are
+cleared by the kernel itself with its `ini` and `global_ini` caches, since
+eZINI reads them by this extension's class name):
+
+| Kernel cache cleared        | Cleared in Valkey |
+|-----------------------------|-------------------|
+| `content`, `template-block` | the content view caches and `{valkey-block}` entries, with their node and subtree indexes; the INI arrays stay |
+
+`eZContentCacheManager` calls it for the nodes of every content change
+(publish, move, hide ...) whatever `StaticCacheHandler` the site uses: the view
+caches and node-expiry entries of those nodes go through the node index, and
+the subtree-expiry entries of the nodes and their path up to the root through
+the subtree index. A site with `sevenxValkeyCacheHandler` as its static cache
+handler is cleared by that handler and not a second time.
+
+Only the keys of this installation (its `KeyPrefix` and `InstallationHash`) are
+touched. Without the PHP redis extension, or with Valkey not answering, nothing
+is cleared in Valkey and the kernel's clear goes on with a warning. The listener
+needs a kernel with `expCacheClearListener` (Exponential 6.0.15 after
+2026-11-27); an older kernel does not read the setting.
+
 ## Implementation notes
 
 The extension deliberately follows the architecture of the `mugo_memcache`

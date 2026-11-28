@@ -426,15 +426,7 @@ class sevenxValkeyCacheBlock
         $this->prefetchedNodes = array();
         $this->prefetchedSubtrees = array();
 
-        $iterator = null;
-        do
-        {
-            $keys = $this->redis->scan( $iterator, $this->prefix . '*' );
-            if ( is_array( $keys ) && !empty( $keys ) )
-            {
-                $this->redis->del( $keys );
-            }
-        } while ( $iterator > 0 );
+        self::deleteKeys( $this->redis, $this->prefix );
 
         return true;
     }
@@ -442,6 +434,59 @@ class sevenxValkeyCacheBlock
     public function clearAll()
     {
         return $this->flush();
+    }
+
+    /**
+     * Deletes this installation's content view caches and {valkey-block} entries with their locks, metadata and node
+     * and subtree indexes, and keeps the compiled INI arrays (the INI keys of sevenxValkeyINICache that share the key
+     * prefix when InstallationHash is a fixed string). Called by sevenxValkeyCacheClearListener when the kernel clears
+     * its content or template-block caches.
+     *
+     * @return bool
+     */
+    public function clearBlocks()
+    {
+        if ( !$this->enabled )
+            return false;
+
+        $this->localCache = array();
+        $this->prefetchedNodes = array();
+        $this->prefetchedSubtrees = array();
+        self::deleteKeys( $this->redis, $this->prefix, array( 'ini', 'inikeys', 'inigen' ) );
+        return true;
+    }
+
+    /**
+     * Deletes every key under $prefix, but those whose remainder after the prefix is one of $keep or starts with one of
+     * them followed by a colon. Walks the key space with SCAN (never KEYS, which blocks the server) and deletes in
+     * batches. Public and static for the tests, which run it against a real Valkey under a key prefix of their own.
+     *
+     * @param Redis $redis
+     * @param string $prefix the key prefix, ending in ':'
+     * @param array $keep first parts of the remainder that stay (array( 'ini' ) keeps "<prefix>ini" and "<prefix>ini:...")
+     * @return int the number of keys deleted
+     */
+    public static function deleteKeys( $redis, $prefix, array $keep = array() )
+    {
+        $deleted = 0;
+        $iterator = null;
+        $pattern = str_replace( array( '\\', '*', '?', '[' ), array( '\\\\', '\\*', '\\?', '\\[' ), $prefix ) . '*';
+        do
+        {
+            $keys = $redis->scan( $iterator, $pattern, 1000 );
+            if ( !is_array( $keys ) || empty( $keys ) )
+                continue;
+            $delete = array();
+            foreach ( $keys as $key )
+            {
+                $first = explode( ':', (string) substr( $key, strlen( $prefix ) ), 2 );
+                if ( !in_array( $first[0], $keep, true ) )
+                    $delete[] = $key;
+            }
+            if ( !empty( $delete ) )
+                $deleted += (int) $redis->del( $delete );
+        } while ( $iterator > 0 );
+        return $deleted;
     }
 
     /** Whether an index of this many entries is prefetched with one MGET (pure): 1 to $max entries, never 0 or more. */

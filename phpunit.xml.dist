@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The extension's own tests, without the kernel: phpunit (from the extension's folder). The test against a real
+     Valkey runs only with VALKEY_TEST_HOST set (tests/sevenxValkeyCacheBlockDeleteKeysTest.php). -->
+<phpunit colors="true">
+    <testsuites>
+        <testsuite name="sevenx_valkey_cache">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>
